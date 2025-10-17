@@ -67,7 +67,7 @@ var (
 	gkeRemoveNetwork               = flag.Bool("gke-remove-network", true, "(gke only) At the end of the test remove non-default network that was used by cluster.")
 	gkeDumpConfigMaps              = flag.String("gke-dump-configmaps", "[]", `(gke-only) A JSON description of ConfigMaps to dump as part of gathering cluster logs. Note: --dump or --dump-pre-test-logs flags must also be set. Example: '[{"Name":"my-map", "Namespace":"default", "DataKey":"my-data-key"}]`)
 	gkeDumpAdditionalLogsCmd       = flag.String("gke-dump-additional-logs-cmd", "", "(gke-only) if set, run this command to dump cluster logs.")
-	gkeMscAdditionalSubnet         = flag.String("gke-msc-additional-subnet", "", "(gke-only) if specified, we create an additional subnet with the specified options. The format should be '<subnet-name> --region=<subnet-gcp-region> --range=<subnet-cidr> <any other optional params>'.")
+	gkeMscAdditionalSubnet         = flag.String("gke-msc-additional-subnet", "", "(gke-only) if specified, we create an additional subnet with the specified gcloud flags. The format should be '<subnet-name> --region=<subnet-gcp-region> --range=<subnet-cidr> <any other optional params>'.")
 
 	// poolReTemplate matches instance group URLs of the form `https://www.googleapis.com/compute/v1/projects/some-project/zones/a-zone/instanceGroupManagers/gke-some-cluster-some-pool-90fcb815-grp`. Match meaning:
 	// m[0]: path starting with zones/
@@ -92,33 +92,37 @@ type gkeConfigMap struct {
 }
 
 type gkeDeployer struct {
-	project                     string
-	zone                        string
-	region                      string
-	locationRaw                 string
-	location                    string
-	additionalZones             string
-	nodeLocations               string
-	nodePorts                   string
-	cluster                     string
-	shape                       map[string]gkeNodePool
-	network                     string
-	subnetwork                  string
-	subnetMode                  string
-	subnetworkRegion            string
-	addtnlSubnetwork            string
-	addtnlSubnetworkRegion      string
-	createNat                   bool
-	natMinPortsPerVM            int
-	image                       string
-	imageFamily                 string
-	imageProject                string
-	commandGroup                []string
-	createCommand               []string
-	singleZoneNodeInstanceGroup bool
-	sshProxyInstanceName        string
-	poolRe                      *regexp.Regexp
-	dumpedConfigMaps            []gkeConfigMap
+	project              string
+	zone                 string
+	region               string
+	locationRaw          string
+	location             string
+	additionalZones      string
+	nodeLocations        string
+	nodePorts            string
+	cluster              string
+	shape                map[string]gkeNodePool
+	network              string
+	subnetwork           string
+	subnetMode           string
+	subnetworkRegion     string
+	additionalSubnetwork string
+	// additionalSubnetworkRegionFlag stores the region flag, i.e.
+	// "--region=us-central1", not "us-central1". This depends on the = based
+	// flag format, not the alternative format --region us-central1. See format
+	// in declaration of `gkeMscAdditionalSubnet`.
+	additionalSubnetworkRegionFlag string
+	createNat                      bool
+	natMinPortsPerVM               int
+	image                          string
+	imageFamily                    string
+	imageProject                   string
+	commandGroup                   []string
+	createCommand                  []string
+	singleZoneNodeInstanceGroup    bool
+	sshProxyInstanceName           string
+	poolRe                         *regexp.Regexp
+	dumpedConfigMaps               []gkeConfigMap
 
 	setup          bool
 	kubecfg        string
@@ -354,6 +358,9 @@ func (g *gkeDeployer) Up() error {
 		g.subnetworkRegion = customSubnetFields[1]
 	}
 
+	// strings.Fields will split string options like description into
+	// individual words which is not what we want but letting this be as is
+	// to be consistent with the rest of the codebase.
 	if *gkeMscAdditionalSubnet != "" {
 		addtnlSubnetFields := strings.Fields(*gkeMscAdditionalSubnet)
 		createSubnetCommand := []string{"compute", "networks", "subnets", "create"}
@@ -362,8 +369,11 @@ func (g *gkeDeployer) Up() error {
 		if err := control.FinishRunning(exec.Command("gcloud", createSubnetCommand...)); err != nil {
 			return err
 		}
-		g.addtnlSubnetwork = addtnlSubnetFields[0]
-		g.addtnlSubnetworkRegion = addtnlSubnetFields[1]
+		if len(addtnlSubnetFields) < 2 {
+			return fmt.Errorf("gke-msc-additional-subnet incorrectly supplied")
+		}
+		g.additionalSubnetwork = addtnlSubnetFields[0]
+		g.additionalSubnetworkRegionFlag = addtnlSubnetFields[1]
 	}
 
 	if *gkeCreateNatBeforeCluster {
@@ -1020,9 +1030,9 @@ func (g *gkeDeployer) Down() error {
 		errSubnet = control.FinishRunning(exec.Command("gcloud", "compute", "networks", "subnets", "delete", "-q", g.subnetwork,
 			g.subnetworkRegion, "--project="+g.project))
 	}
-	if g.addtnlSubnetwork != "" {
-		errSubnet = control.FinishRunning(exec.Command("gcloud", "compute", "networks", "subnets", "delete", "-q", g.addtnlSubnetwork,
-			g.addtnlSubnetworkRegion, "--project="+g.project))
+	if g.additionalSubnetwork != "" {
+		errSubnet = control.FinishRunning(exec.Command("gcloud", "compute", "networks", "subnets", "delete", "-q", g.additionalSubnetwork,
+			g.additionalSubnetworkRegionFlag, "--project="+g.project))
 	}
 	var errNetwork error
 	if *gkeRemoveNetwork {
